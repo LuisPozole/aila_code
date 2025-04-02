@@ -1,8 +1,9 @@
-  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                index.js                                                                                                                                                                                                                                                                                                                                                                                         
 const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const cors = require('cors');
+const fetch = require('node-fetch');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const port = 3000;
@@ -10,12 +11,20 @@ const port = 3000;
 app.use(express.json());
 app.use(cors());
 
-// Inicializar el cliente de WhatsApp Web con autenticación local
+// Configuración de MongoDB
+const mongoUri = "mongodb+srv://Luis:XahmSNY8h2ykcQEA@aila.ilku2.mongodb.net/Aila";
+const clientMongo = new MongoClient(mongoUri);
+const dbName = "Aila";
+
+// Inicializar el cliente de WhatsApp Web
 const client = new Client({
-    authStrategy: new LocalAuth()
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
 
-// Mostrar el código QR en la terminal
 client.on('qr', qr => {
     console.log('📱 Escanea este código QR para conectar WhatsApp:');
     qrcode.generate(qr, { small: true });
@@ -25,24 +34,52 @@ client.on('ready', () => {
     console.log('✅ Conectado a WhatsApp');
 });
 
-// Endpoint para enviar mensajes a WhatsApp
-app.post('/enviar-mensaje', async (req, res) => {
-    const { numero, mensaje } = req.body;
-    const chatId = `${numero}@c.us`;
-    
-    try {
-        const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) {
-            return res.status(400).json({ error: 'El número no está registrado en WhatsApp' });
-        }
+client.on('auth_failure', msg => {
+    console.error('❌ Error de autenticación:', msg);
+});
 
-        await client.sendMessage(chatId, mensaje);
-        console.log(`🚀 Mensaje enviado a ${numero}: ${mensaje}`);
-        res.json({ success: true, message: 'Mensaje enviado correctamente' });
+client.on('disconnected', reason => {
+    console.log('⚠️ Cliente desconectado:', reason);
+    client.initialize();
+});
+
+// Función para obtener el nombre del contacto desde MongoDB
+async function obtenerNombreUsuario(numero) {
+    try {
+        await clientMongo.connect();
+        const db = clientMongo.db(dbName);
+        const collection = db.collection("Usuarios");
+        
+        const usuario = await collection.findOne({ "contacto.telefono": numero });
+        
+        if (usuario) {
+            const contacto = usuario.contacto.find(c => c.telefono === numero);
+            return contacto ? contacto.nombre : "usuario desconocido";
+        }
+        return "usuario desconocido";
     } catch (error) {
-        console.error('❌ Error enviando mensaje:', error);
-        res.status(500).json({ error: 'Error al enviar mensaje' });
+        console.error("❌ Error consultando MongoDB:", error);
+        return "usuario desconocido";
     }
+}
+
+// Escuchar mensajes entrantes y enviarlos a la Raspberry Pi
+client.on('message', async msg => {
+    console.log(`📩 Mensaje recibido de ${msg.from}: ${msg.body}`);
+
+    // Extraer el número sin el sufijo "@c.us"
+    const numero = msg.from.replace('@c.us', '');
+    const nombreUsuario = await obtenerNombreUsuario(numero);
+
+    // Enviar mensaje a la Raspberry Pi para que AILA lo lea
+    fetch("http://raspberrypi:5000/nuevo-mensaje", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ numero: nombreUsuario, mensaje: msg.body })
+    })
+    .then(response => response.json())
+    .then(data => console.log("✅ Mensaje enviado a la Raspberry:", data))
+    .catch(err => console.error("❌ Error enviando mensaje a la Raspberry:", err));
 });
 
 // Iniciar el servidor Express
@@ -52,6 +89,3 @@ app.listen(port, () => {
 
 // Inicializar WhatsApp
 client.initialize();
-
-
-
