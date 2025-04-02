@@ -1,0 +1,176 @@
+import requests
+import numpy as np
+import queue
+import google.generativeai as genai
+import wave
+import io
+import pygame
+import sounddevice as sd
+import json
+import time
+import os
+from vosk import Model, KaldiRecognizer
+from gtts import gTTS
+
+# Configuración de la API de Gemini
+genai.configure(api_key="AIzaSyDSPU3HTfAB_jnIwi--8yhBGzUtUVs5N6U")
+model = genai.GenerativeModel("gemini-1.5-flash")
+
+# Configuración de audio
+samplerate = 50000  # Frecuencia de muestreo
+duration = 5  # Duración de la grabación en segundos
+channels = 1  # Mono
+q = queue.Queue()
+
+# Inicializar pygame correctamente en MONO
+pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+
+# Umbral de detección de aplausos
+applause_threshold = 0.03  # Ajustar según el entorno
+
+# Cargar el modelo de Vosk
+VOSK_MODEL_PATH = "/home/pi/vosk-model-small-es-0.42"
+vosk_model = Model(VOSK_MODEL_PATH)
+
+# Lista de contactos predefinidos
+contactos = {
+    "luis": "524271026537",
+    "juan": "5215567890123"
+}
+
+# Función para capturar audio desde el micrófono
+def callback(indata, frames, time, status):
+    if status:
+        print(status)
+    q.put(indata.copy())
+
+def grabar_audio(archivo_salida="input.wav"):
+    print("🎤 Grabando audio...")
+    with sd.InputStream(samplerate=samplerate, channels=channels, callback=callback):
+        audio_data = []
+        for _ in range(int(samplerate / 1024 * duration)):
+            audio_data.append(q.get())
+        audio_np = np.concatenate(audio_data, axis=0)
+
+    audio_np = (audio_np * 32767).astype(np.int16)
+
+    with wave.open(archivo_salida, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(samplerate)
+        wf.writeframes(audio_np.tobytes())
+
+    print("✅ Audio guardado como", archivo_salida)
+    return archivo_salida
+
+# Función para transcribir el audio con Vosk
+def transcribir_audio(archivo):
+    print("📝 Transcribiendo con Vosk...")
+    
+    with wave.open(archivo, "rb") as wf:
+        rec = KaldiRecognizer(vosk_model, wf.getframerate())
+        rec.SetWords(True)
+
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            rec.AcceptWaveform(data)
+
+        resultado = json.loads(rec.FinalResult())
+        return resultado.get("text", "")
+
+# Función para obtener respuesta de Gemini AI
+def obtener_respuesta(texto):
+    print(f"🤖 Enviando a Gemini: {texto}")
+    response = model.generate_content(texto)
+    return response.text if response and response.text else "Lo siento, no entendí."
+
+# Función para convertir texto a voz y reproducir con pygame
+def hablar(texto):
+    print("🔊 Generando voz...")
+    
+    tts = gTTS(texto, lang="es")
+    audio_stream = io.BytesIO()
+    tts.write_to_fp(audio_stream)
+    audio_stream.seek(0)
+
+    with open("temp_audio.mp3", "wb") as f:
+        f.write(audio_stream.read())
+
+    pygame.mixer.music.load("temp_audio.mp3")
+    pygame.mixer.music.play()
+
+    while pygame.mixer.music.get_busy():
+        pygame.time.wait(100)
+
+    audio_stream.close()
+
+# Función para enviar mensajes a WhatsApp
+def enviar_mensaje_whatsapp(numero, mensaje):
+    url = "http://localhost:3000/enviar-mensaje"
+    payload = {"numero": numero, "mensaje": mensaje}
+    
+    try:
+        response = requests.post(url, json=payload)
+        if response.status_code == 200:
+            print(f"✅ Mensaje enviado a {numero}")
+            return "Mensaje enviado exitosamente."
+        else:
+            print(f"❌ Error enviando mensaje: {response.text}")
+            return "Hubo un error al enviar el mensaje."
+    except Exception as e:
+        print(f"⚠️ Error de conexión: {e}")
+        return "No pude conectar con el servidor de mensajes."
+
+# Función para detectar un aplauso
+def detectar_aplauso():
+    print("👏 Esperando aplauso para activar AILA...")
+    
+    while True:
+        audio = sd.rec(int(samplerate * 0.5), samplerate=samplerate, channels=1, dtype="float32")
+        sd.wait()
+        volumen = np.sqrt(np.mean(audio**2))
+        
+        if volumen > applause_threshold:
+            print("✅ APLAUSO DETECTADO: AILA ACTIVADA 🔥")
+            return True
+
+# Función para procesar comandos de voz
+def procesar_comando(texto):
+    if "envia un mensaje" in texto:
+        hablar("¿A quién quieres enviar un mensaje?")
+        nombre = transcribir_audio(grabar_audio()).strip()
+
+        if nombre in contactos:
+            hablar(f"¿Qué quieres decirle a {nombre}?")
+            mensaje = transcribir_audio(grabar_audio()).strip()
+            
+            if mensaje:
+                respuesta = enviar_mensaje_whatsapp(contactos[nombre], mensaje)
+                hablar(respuesta)
+            else:
+                hablar("No entendí el mensaje. Inténtalo de nuevo.")
+        else:
+            hablar(f"No tengo registrado a {nombre} en mi lista de contactos.")
+    else:
+        respuesta = obtener_respuesta(texto)
+        hablar(respuesta)
+
+# Función principal
+def main():
+    hablar("Hola! Soy AILA, y estoy aquí para ayudarte. Solo estoy a un aplauso de distancia.")
+    
+    while True:
+        if detectar_aplauso():
+            archivo_audio = grabar_audio()
+            texto = transcribir_audio(archivo_audio)
+            
+            if texto.strip():
+                procesar_comando(texto)
+            else:
+                print("⚠ No se detectó ningún mensaje, intenta de nuevo.")
+
+# Ejecutar el programa
+if __name__ == "__main__":
+    main()
