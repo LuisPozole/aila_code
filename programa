@@ -10,11 +10,14 @@ import json
 import time
 import os
 import threading
-import re  # Nuevo import añadido
+import re
 from pymongo import MongoClient
 from vosk import Model, KaldiRecognizer
 from gtts import gTTS
 from flask import Flask, request
+
+# Variable global para controlar el estado de habla
+aila_hablando = False
 
 # Configuración de la API de Gemini
 genai.configure(api_key="AIzaSyDSPU3HTfAB_jnIwi--8yhBGzUtUVs5N6U")
@@ -97,6 +100,8 @@ def obtener_respuesta(texto):
     return response.text if response and response.text else "Lo siento, no entendí."
 
 def hablar(texto):
+    global aila_hablando
+    aila_hablando = True
     print("🔊 Generando voz...")
     tts = gTTS(texto, lang="es")
     audio_stream = io.BytesIO()
@@ -109,6 +114,7 @@ def hablar(texto):
     while pygame.mixer.music.get_busy():
         pygame.time.wait(100)
     audio_stream.close()
+    aila_hablando = False
 
 def enviar_mensaje_whatsapp(numero, mensaje):
     url = "http://localhost:3000/enviar-mensaje"
@@ -128,12 +134,15 @@ def enviar_mensaje_whatsapp(numero, mensaje):
 def detectar_aplauso():
     print("👏 Esperando aplauso para activar AILA...")
     while True:
-        audio = sd.rec(int(samplerate * 0.5), samplerate=samplerate, channels=1, dtype="float32")
-        sd.wait()
-        volumen = np.sqrt(np.mean(audio**2))
-        if volumen > applause_threshold:
-            print("✅ APLAUSO DETECTADO: AILA ACTIVADA 🔥")
-            return True
+        if not aila_hablando:
+            audio = sd.rec(int(samplerate * 0.5), samplerate=samplerate, channels=1, dtype="float32")
+            sd.wait()
+            volumen = np.sqrt(np.mean(audio**2))
+            if volumen > applause_threshold:
+                print("✅ APLAUSO DETECTADO: AILA ACTIVADA 🔥")
+                return True
+        else:
+            time.sleep(0.1)
 
 def procesar_comando(texto):
     global contactos
@@ -175,6 +184,7 @@ def procesar_comando(texto):
         hablar(respuesta)
 
 def main():
+    global aila_hablando
     hablar("Hola! Soy AILA, y estoy aquí para ayudarte. Solo estoy a un aplauso de distancia.")
     while True:
         if detectar_aplauso():
