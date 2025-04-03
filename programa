@@ -10,6 +10,7 @@ import json
 import time
 import os
 import threading
+import re  # Nuevo import añadido
 from pymongo import MongoClient
 from vosk import Model, KaldiRecognizer
 from gtts import gTTS
@@ -137,14 +138,33 @@ def detectar_aplauso():
 def procesar_comando(texto):
     global contactos
     contactos = obtener_contactos()
-    if "envia un mensaje" in texto:
+    
+    # Normalizar texto para comparación
+    texto_limpio = re.sub(r'[^\w\s]', '', texto.strip().lower())
+    
+    # Respuestas predefinidas
+    if texto_limpio == "quien eres":
+        hablar("Mi nombre es AILA, soy un asistente personal desarrollado por alumnos de la universidad tecnológica de San Juan del Río, mi propósito es ayudarte para hacer tu vida un poco más fácil, es un placer estar aquí.")
+        return
+    elif texto_limpio == "que puedes hacer":
+        hablar("Puedo enviar y recibir mensajes a tus contactos para mejorar su comunicación, también cuido la calidad de aire que hay en tu casa, y puedo ayudarte a resolver dudas, o simplemente conversar un poco contigo.")
+        return
+    elif texto_limpio == "saluda al doctor":
+        hablar("¡Hola doctor Fidencio! Mis creadores me han hablado mucho de usted, dígame, ¿en qué puedo ayudarle?")
+        return
+    
+    # Comando para enviar mensaje
+    if "envia un mensaje" in texto_limpio:
         hablar("¿A quién quieres enviar un mensaje?")
-        nombre = transcribir_audio(grabar_audio()).strip().lower()
-        if nombre in contactos:
+        nombre_audio = grabar_audio()
+        nombre = transcribir_audio(nombre_audio).strip().lower()
+        nombre_limpio = re.sub(r'[^\w\s]', '', nombre)
+        if nombre_limpio in contactos:
             hablar(f"¿Qué quieres decirle a {nombre}?")
-            mensaje = transcribir_audio(grabar_audio()).strip()
+            mensaje_audio = grabar_audio()
+            mensaje = transcribir_audio(mensaje_audio).strip()
             if mensaje:
-                respuesta = enviar_mensaje_whatsapp(contactos[nombre], mensaje)
+                respuesta = enviar_mensaje_whatsapp(contactos[nombre_limpio], mensaje)
                 hablar(respuesta)
             else:
                 hablar("No entendí el mensaje. Inténtalo de nuevo.")
