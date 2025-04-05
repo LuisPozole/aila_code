@@ -51,6 +51,36 @@ clap_detection_delay = 0.5  # Tiempo entre detecciones
 VOSK_MODEL_PATH = "/home/pi/vosk-model-small-es-0.42"
 vosk_model = Model(VOSK_MODEL_PATH)
 
+# Personalidad de AILA
+AILA_PERSONALIDAD = """
+Eres AILA, un asistente virtual de última generación desarrollado por alumnos de la Universidad Tecnológica de San Juan del Río.
+Características principales:
+- Personalidad: Amable, servicial y proactiva
+- Estilo: Profesional pero cercano, con toques de humor ligero
+- Funcionalidades: Envío de mensajes, monitoreo ambiental, asistencia inteligente
+- Restricciones: No discutir temas sensibles, mantener foco en ayudar
+
+Ejemplos de respuestas adecuadas:
+- "¡Claro! ¿Qué necesitas en este momento?"
+- "Mensaje enviado ✅ ¿Algo más en lo que pueda ayudarte? 😊"
+- "La calidad del aire es óptima. ¿Quieres activar la purificación automática?"
+- "Disculpa, no tengo esa información. ¿Quieres que busque recursos actualizados?"
+"""
+
+# Memoria de contexto
+class MemoriaAILA:
+    def __init__(self):
+        self.contexto = []
+        self.ultima_accion = None
+    
+    def agregar_contexto(self, texto):
+        self.contexto.append(texto[-500:])  # Mantener últimos 500 caracteres
+    
+    def obtener_contexto(self):
+        return "\n".join(self.contexto[-3:])  # Últimos 3 intercambios
+
+memoria = MemoriaAILA()
+
 def generar_beep():
     """Genera un sonido de beep usando síntesis de onda sinusoidal"""
     samples = int(44100 * BEEP_DURATION)
@@ -117,19 +147,69 @@ def transcribir_audio(archivo):
         resultado = json.loads(rec.FinalResult())
         return resultado.get("text", "")
 
+def procesar_envio_mensaje(contacto, mensaje):
+    contactos_actualizados = obtener_contactos()
+    nombre_limpio = re.sub(r'[^\w\s]', '', contacto.strip().lower())
+    
+    if nombre_limpio in contactos_actualizados:
+        resultado = enviar_mensaje_whatsapp(contactos_actualizados[nombre_limpio], mensaje)
+        return f"📩 Mensaje para {contacto}: '{mensaje}'\n{resultado}"
+    else:
+        sugerencias = [c for c in contactos_actualizados if nombre_limpio in c]
+        if sugerencias:
+            return f"No encontré {contacto}, ¿quisiste decir: {', '.join(sugerencias)}?"
+        else:
+            return f"⚠️ {contacto} no está en contactos. ¿Quieres agregarlo?"
+
 def obtener_respuesta(texto):
     print(f"🤖 Enviando a Gemini: {texto}")
     try:
-        response = model.generate_content(texto)
-        return response.text if response and response.text else "Lo siento, no entendí."
+        contexto = memoria.obtener_contexto()
+        prompt = f"""
+        {AILA_PERSONALIDAD}
+        
+        Historial reciente:
+        {contexto}
+        
+        Usuario: {texto}
+        AILA:"""
+        
+        response = model.generate_content(prompt)
+        respuesta = response.text.strip()
+        
+        # Procesamiento de respuesta
+        respuesta = re.sub(r'\*+', '', respuesta)  # Eliminar negritas/cursivas
+        respuesta = re.sub(r'\n+', ' ', respuesta)  # Unificar saltos de línea
+        
+        # Manejo de comandos especiales
+        if "[ENVIAR_MENSAJE]" in respuesta:
+            partes = respuesta.split("[ENVIAR_MENSAJE]")[1].split("|")
+            contacto = partes[0].strip()
+            mensaje = partes[1].strip()
+            return procesar_envio_mensaje(contacto, mensaje)
+            
+        memoria.agregar_contexto(f"Usuario: {texto}\nAILA: {respuesta}")
+        
+        return respuesta if respuesta else "¿Necesitas que repita o prefieres una explicación diferente?"
+    
     except Exception as e:
         print(f"❌ Error en Gemini: {e}")
-        return "Hubo un error al procesar tu solicitud."
+        return "¡Vaya! Parece que tengo problemas técnicos. ¿Podrías intentarlo de nuevo?"
 
 def hablar(texto):
     global aila_hablando
     aila_hablando = True
     print("🔊 Generando voz con ElevenLabs...")
+
+    # Añadir pausas naturales
+    texto_con_pausas = texto.replace('.', '. ').replace(',', ', ').replace('!', '! ').replace('?', '? ')
+    
+    # Ajustar velocidad según contenido
+    velocidad = 1.0  # Normal
+    if any(emoji in texto for emoji in ['😊', '🤖']):
+        velocidad = 1.1
+    elif '⚠️' in texto or '❌' in texto:
+        velocidad = 0.9
 
     headers = {
         "Accept": "audio/mpeg",
@@ -138,7 +218,7 @@ def hablar(texto):
     }
 
     data = {
-        "text": texto,
+        "text": f"<speak><prosody rate='{velocidad}'>{texto_con_pausas}</prosody></speak>",
         "model_id": "eleven_multilingual_v1",
         "voice_settings": {
             "stability": 0.5,
@@ -206,13 +286,13 @@ def procesar_comando(texto):
     texto_limpio = re.sub(r'[^\w\s]', '', texto.strip().lower())
     
     if texto_limpio == "quien eres":
-        hablar("Mi nombre es AILA, soy un asistente personal desarrollado por alumnos de la universidad tecnológica de San Juan del Río. Mi propósito es ayudarte para hacer tu vida un poco más fácil. ¡Es un placer estar aquí!")
+        hablar("Mi nombre es AILA, soy un asistente personal desarrollado por alumnos de la universidad tecnológica de San Juan del Río. ¡Estoy aquí para hacer tu vida más fácil! 😊")
         return
     elif texto_limpio == "que puedes hacer":
-        hablar("Puedo enviar y recibir mensajes a tus contactos, monitorear la calidad del aire en tu hogar, resolver tus dudas y mantener conversaciones contigo. ¿En qué te puedo ayudar?")
+        hablar("Puedo enviar mensajes WhatsApp, monitorear tu ambiente, resolver dudas y aprender de tus preferencias. ¿En qué te puedo ayudar hoy?")
         return
     elif texto_limpio == "saluda al doctor":
-        hablar("¡Hola doctor Fidencio! Mis creadores me han hablado mucho de usted. ¿En qué puedo ayudarle hoy?")
+        hablar("¡Hola doctor Fidencio! Es un honor interactuar con usted. ¿En qué puedo colaborarle hoy?")
         return
     
     if "envia un mensaje" in texto_limpio:
@@ -228,16 +308,16 @@ def procesar_comando(texto):
                 respuesta = enviar_mensaje_whatsapp(contactos[nombre_limpio], mensaje)
                 hablar(respuesta)
             else:
-                hablar("No entendí el mensaje. Por favor inténtalo de nuevo.")
+                hablar("No entendí el mensaje. ¿Podrías repetirlo por favor?")
         else:
-            hablar(f"No tengo registrado a {nombre} en mi lista de contactos.")
+            hablar(f"No tengo registrado a {nombre}. ¿Quieres que revise nuevamente los contactos?")
     else:
         respuesta = obtener_respuesta(texto)
         hablar(respuesta)
 
 def main():
     global aila_hablando
-    hablar("¡Hola! Soy AILA, tu asistente personal. Puedes activarme con un aplauso cuando necesites ayuda.")
+    hablar("¡Hola! Soy AILA, tu asistente personal. Puedes activarme con un aplauso cuando necesites ayuda. 😊")
     while True:
         if detectar_aplauso():
             archivo_audio = grabar_audio()
@@ -246,7 +326,7 @@ def main():
                 procesar_comando(texto)
             else:
                 print("⚠ No se detectó ningún mensaje")
-                hablar("No escuché tu solicitud. ¿Podrías repetirla por favor?")
+                hablar("Parece que no capté tu solicitud. ¿Podrías repetirla?")
 
 app = Flask(__name__)
 @app.route("/nuevo-mensaje", methods=["POST"])
