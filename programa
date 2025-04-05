@@ -1,7 +1,6 @@
 import requests
 import numpy as np
 import queue
-import google.generativeai as genai
 import wave
 import io
 import pygame
@@ -13,13 +12,17 @@ import threading
 import re
 from pymongo import MongoClient
 from vosk import Model, KaldiRecognizer
-from gtts import gTTS
 from flask import Flask, request
 
 # Variable global para controlar el estado de habla
 aila_hablando = False
 
+# API Key de ElevenLabs
+ELEVENLABS_API_KEY = "sk_5799c8c4bbe95184b35913b950acbc8e7753d5b65be8a706"
+ELEVENLABS_VOICE_ID = "Xb7hH8MSUJpSbSDYk0k2"
+
 # Configuración de la API de Gemini
+import google.generativeai as genai
 genai.configure(api_key="AIzaSyDSPU3HTfAB_jnIwi--8yhBGzUtUVs5N6U")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
@@ -27,6 +30,38 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 MONGO_URI = "mongodb+srv://Luis:XahmSNY8h2ykcQEA@aila.ilku2.mongodb.net/Aila"
 DATABASE_NAME = "Aila"
 COLLECTION_NAME = "Usuarios"
+
+# Configuración de audio
+samplerate = 44100  # Frecuencia estándar
+duration = 5         # Duración de grabación en segundos
+channels = 1
+q = queue.Queue()
+pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+
+# Parámetros del sonido de activación
+BEEP_FREQUENCY = 1000  # Hz
+BEEP_DURATION = 0.3    # segundos
+BEEP_VOLUME = 0.5      # 0 a 1
+
+# Umbral para detección de aplausos
+applause_threshold = 0.05
+clap_detection_delay = 0.5  # Tiempo entre detecciones
+
+# Modelo VOSK
+VOSK_MODEL_PATH = "/home/pi/vosk-model-small-es-0.42"
+vosk_model = Model(VOSK_MODEL_PATH)
+
+def generar_beep():
+    """Genera un sonido de beep usando síntesis de onda sinusoidal"""
+    samples = int(44100 * BEEP_DURATION)
+    t = np.linspace(0, BEEP_DURATION, samples, False)
+    wave = 0.5 * np.sin(2 * np.pi * BEEP_FREQUENCY * t)
+    
+    # Convertir a formato de sonido de 16 bits
+    audio = (wave * 32767 * BEEP_VOLUME).astype(np.int16)
+    sound = pygame.sndarray.make_sound(audio)
+    sound.play()
+    time.sleep(BEEP_DURATION)
 
 def obtener_contactos():
     try:
@@ -46,18 +81,6 @@ def obtener_contactos():
         return {}
 
 contactos = obtener_contactos()
-
-# Configuración de audio
-samplerate = 50000
-duration = 5
-channels = 1
-q = queue.Queue()
-pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
-
-applause_threshold = 0.03
-
-VOSK_MODEL_PATH = "/home/pi/vosk-model-small-es-0.42"
-vosk_model = Model(VOSK_MODEL_PATH)
 
 def callback(indata, frames, time, status):
     if status:
@@ -96,24 +119,52 @@ def transcribir_audio(archivo):
 
 def obtener_respuesta(texto):
     print(f"🤖 Enviando a Gemini: {texto}")
-    response = model.generate_content(texto)
-    return response.text if response and response.text else "Lo siento, no entendí."
+    try:
+        response = model.generate_content(texto)
+        return response.text if response and response.text else "Lo siento, no entendí."
+    except Exception as e:
+        print(f"❌ Error en Gemini: {e}")
+        return "Hubo un error al procesar tu solicitud."
 
 def hablar(texto):
     global aila_hablando
     aila_hablando = True
-    print("🔊 Generando voz...")
-    tts = gTTS(texto, lang="es")
-    audio_stream = io.BytesIO()
-    tts.write_to_fp(audio_stream)
-    audio_stream.seek(0)
-    with open("temp_audio.mp3", "wb") as f:
-        f.write(audio_stream.read())
-    pygame.mixer.music.load("temp_audio.mp3")
-    pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
-        pygame.time.wait(100)
-    audio_stream.close()
+    print("🔊 Generando voz con ElevenLabs...")
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+
+    data = {
+        "text": texto,
+        "model_id": "eleven_multilingual_v1",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.5,
+            "use_speaker_boost": True
+        }
+    }
+
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+
+    try:
+        response = requests.post(url, json=data, headers=headers)
+        if response.status_code == 200:
+            with open("temp_audio.mp3", "wb") as f:
+                f.write(response.content)
+            pygame.mixer.music.load("temp_audio.mp3")
+            pygame.mixer.music.play()
+            while pygame.mixer.music.get_busy():
+                pygame.time.wait(100)
+            os.remove("temp_audio.mp3")
+        else:
+            print("❌ Error generando voz:", response.text)
+    except Exception as e:
+        print("❌ Error de red al contactar ElevenLabs:", e)
+
     aila_hablando = False
 
 def enviar_mensaje_whatsapp(numero, mensaje):
@@ -135,11 +186,15 @@ def detectar_aplauso():
     print("👏 Esperando aplauso para activar AILA...")
     while True:
         if not aila_hablando:
-            audio = sd.rec(int(samplerate * 0.5), samplerate=samplerate, channels=1, dtype="float32")
+            audio = sd.rec(int(samplerate * clap_detection_delay), 
+                          samplerate=samplerate, 
+                          channels=1, 
+                          dtype="float32")
             sd.wait()
             volumen = np.sqrt(np.mean(audio**2))
             if volumen > applause_threshold:
-                print("✅ APLAUSO DETECTADO: AILA ACTIVADA 🔥")
+                print(f"✅ APLAUSO DETECTADO (Nivel: {volumen:.4f})")
+                threading.Thread(target=generar_beep).start()
                 return True
         else:
             time.sleep(0.1)
@@ -148,21 +203,18 @@ def procesar_comando(texto):
     global contactos
     contactos = obtener_contactos()
     
-    # Normalizar texto para comparación
     texto_limpio = re.sub(r'[^\w\s]', '', texto.strip().lower())
     
-    # Respuestas predefinidas
     if texto_limpio == "quien eres":
-        hablar("Mi nombre es AILA, soy un asistente personal desarrollado por alumnos de la universidad tecnológica de San Juan del Río, mi propósito es ayudarte para hacer tu vida un poco más fácil, es un placer estar aquí.")
+        hablar("Mi nombre es AILA, soy un asistente personal desarrollado por alumnos de la universidad tecnológica de San Juan del Río. Mi propósito es ayudarte para hacer tu vida un poco más fácil. ¡Es un placer estar aquí!")
         return
     elif texto_limpio == "que puedes hacer":
-        hablar("Puedo enviar y recibir mensajes a tus contactos para mejorar su comunicación, también cuido la calidad de aire que hay en tu casa, y puedo ayudarte a resolver dudas, o simplemente conversar un poco contigo.")
+        hablar("Puedo enviar y recibir mensajes a tus contactos, monitorear la calidad del aire en tu hogar, resolver tus dudas y mantener conversaciones contigo. ¿En qué te puedo ayudar?")
         return
     elif texto_limpio == "saluda al doctor":
-        hablar("¡Hola doctor Fidencio! Mis creadores me han hablado mucho de usted, dígame, ¿en qué puedo ayudarle?")
+        hablar("¡Hola doctor Fidencio! Mis creadores me han hablado mucho de usted. ¿En qué puedo ayudarle hoy?")
         return
     
-    # Comando para enviar mensaje
     if "envia un mensaje" in texto_limpio:
         hablar("¿A quién quieres enviar un mensaje?")
         nombre_audio = grabar_audio()
@@ -176,7 +228,7 @@ def procesar_comando(texto):
                 respuesta = enviar_mensaje_whatsapp(contactos[nombre_limpio], mensaje)
                 hablar(respuesta)
             else:
-                hablar("No entendí el mensaje. Inténtalo de nuevo.")
+                hablar("No entendí el mensaje. Por favor inténtalo de nuevo.")
         else:
             hablar(f"No tengo registrado a {nombre} en mi lista de contactos.")
     else:
@@ -185,7 +237,7 @@ def procesar_comando(texto):
 
 def main():
     global aila_hablando
-    hablar("Hola! Soy AILA, y estoy aquí para ayudarte. Solo estoy a un aplauso de distancia.")
+    hablar("¡Hola! Soy AILA, tu asistente personal. Puedes activarme con un aplauso cuando necesites ayuda.")
     while True:
         if detectar_aplauso():
             archivo_audio = grabar_audio()
@@ -193,7 +245,8 @@ def main():
             if texto.strip():
                 procesar_comando(texto)
             else:
-                print("⚠ No se detectó ningún mensaje, intenta de nuevo.")
+                print("⚠ No se detectó ningún mensaje")
+                hablar("No escuché tu solicitud. ¿Podrías repetirla por favor?")
 
 app = Flask(__name__)
 @app.route("/nuevo-mensaje", methods=["POST"])
